@@ -54,6 +54,7 @@ export default function TypingTrainer({
     const saved = localStorage.getItem('loopInactivityEnabled');
     return saved ? saved === 'true' : true;
   });
+  const [ttsHighlight, setTtsHighlight] = useState<{ lineIndex: number; start: number; end: number } | null>(null);
 
   const activeLineRef = useRef<HTMLDivElement>(null);
   const focusRef = useRef<HTMLDivElement>(null);
@@ -312,7 +313,7 @@ export default function TypingTrainer({
                     }
                     if (settings.autoplayNextLine && nextLineIndex < linesRef.current.length) {
                       const nextLine = linesRef.current[nextLineIndex];
-                      if (nextLine) speak(getRenderedText(nextLine.text));
+                      if (nextLine) speak(getRenderedText(nextLine.text), undefined, { startLineIndex: nextLineIndex });
                     }
                     setTypingState((p) => ({
                       ...p,
@@ -331,7 +332,7 @@ export default function TypingTrainer({
                 if (completedWord && completedWord !== prev.lastSpokenWord && ttsSettingsRef.current.speakOnWordComplete) {
                   speak(completedWord, () => {
                     startInactivityLoop(renderedText, newCaret);
-                  });
+                  }, { startLineIndex: typingStateRef.current.currentLineIndex });
                 }
 
                 return {
@@ -447,9 +448,10 @@ export default function TypingTrainer({
   );
 
   const speak = useCallback(
-    (text: string, onEnd?: () => void) => {
+    (text: string, onEnd?: () => void, context?: { startLineIndex: number }) => {
       if (!text) return;
       window.speechSynthesis.cancel();
+      setTtsHighlight(null);
 
       const utterance = new SpeechSynthesisUtterance(text);
       const voice = window.speechSynthesis.getVoices().find((v) => v.name === ttsSettingsRef.current.voice);
@@ -458,9 +460,21 @@ export default function TypingTrainer({
       utterance.pitch = ttsSettingsRef.current.pitch;
       utterance.volume = ttsSettingsRef.current.volume;
 
-      if (onEnd) {
-        utterance.onend = onEnd;
-      }
+      utterance.onboundary = (e) => {
+        if (e.name === 'word' && context) {
+          const mapped = mapCharIndexToLinePosition(e.charIndex, e.charLength || 0, context.startLineIndex, linesRef.current);
+          if (mapped) setTtsHighlight(mapped);
+        }
+      };
+
+      utterance.onend = () => {
+        setTtsHighlight(null);
+        if (onEnd) onEnd();
+      };
+
+      utterance.onerror = () => {
+        setTtsHighlight(null);
+      };
 
       utteranceRef.current = utterance;
       window.speechSynthesis.speak(utterance);
@@ -473,6 +487,7 @@ export default function TypingTrainer({
     window.speechSynthesis.cancel();
     setIsPlaying(false);
     loopAbortRef.current = true;
+    setTtsHighlight(null);
     if (inactivityTimerRef.current) {
       clearTimeout(inactivityTimerRef.current);
       inactivityTimerRef.current = null;
@@ -511,6 +526,8 @@ export default function TypingTrainer({
       loopTextRef.current = lineText.substring(0, end).trim();
       if (!loopTextRef.current) return;
 
+      const context = { startLineIndex: typingStateRef.current.currentLineIndex };
+
       inactivityTimerRef.current = setTimeout(() => {
         if (loopAbortRef.current || !loopTextRef.current) return;
         const doLoop = () => {
@@ -521,7 +538,7 @@ export default function TypingTrainer({
               if (loopAbortRef.current) return;
               doLoop();
             }, 2000);
-          });
+          }, context);
         };
         doLoop();
       }, 2000);
@@ -531,6 +548,7 @@ export default function TypingTrainer({
 
   const stopInactivityLoop = useCallback(() => {
     loopAbortRef.current = true;
+    setTtsHighlight(null);
     if (inactivityTimerRef.current) {
       clearTimeout(inactivityTimerRef.current);
       inactivityTimerRef.current = null;
@@ -546,7 +564,7 @@ export default function TypingTrainer({
         const line = linesRef.current[lineIndex];
         if (line) {
           const rendered = getRenderedText(line.text);
-          if (rendered) speak(rendered);
+          if (rendered) speak(rendered, undefined, { startLineIndex: lineIndex });
         }
       }
     },
@@ -561,7 +579,7 @@ export default function TypingTrainer({
       .map((l) => getRenderedText(l.text))
       .filter((t) => t.length > 0)
       .join(' ');
-    speak(remainingText);
+    speak(remainingText, undefined, { startLineIndex: typingStateRef.current.currentLineIndex });
   }, [speak, stopSpeaking, playSound]);
 
   const playLine = useCallback(() => {
@@ -571,19 +589,20 @@ export default function TypingTrainer({
     if (currentLine) {
       const rendered = getRenderedText(currentLine.text);
       if (!rendered) return;
+      const context = { startLineIndex: typingStateRef.current.currentLineIndex };
       if (ttsSettingsRef.current.loopCurrentLine && ttsSettingsRef.current.loopCount > 1) {
         loopCountRef.current = 0;
         const playLoop = () => {
           loopCountRef.current++;
           if (loopCountRef.current < ttsSettingsRef.current.loopCount) {
-            speak(rendered, playLoop);
+            speak(rendered, playLoop, context);
           } else {
-            speak(rendered);
+            speak(rendered, undefined, context);
           }
         };
         playLoop();
       } else {
-        speak(rendered);
+        speak(rendered, undefined, context);
       }
     }
   }, [speak, stopSpeaking, playSound]);
@@ -591,7 +610,7 @@ export default function TypingTrainer({
   const replayWord = useCallback(() => {
     playSound('click');
     if (typingStateRef.current.lastSpokenWord) {
-      speak(typingStateRef.current.lastSpokenWord);
+      speak(typingStateRef.current.lastSpokenWord, undefined, { startLineIndex: typingStateRef.current.currentLineIndex });
     }
   }, [speak, playSound]);
 
@@ -789,35 +808,42 @@ export default function TypingTrainer({
                     >
                       {isActive ? (
                         <div className={`flex flex-wrap ${lineStyle}`}>
-                          {renderedChars.map((rc, charIndex) => {
-                            const isCorrect = typingState.correctChars.has(charIndex);
-                            const isError = typingState.errorChars.has(charIndex);
-                            const isCaret = charIndex === typingState.caretIndex;
-
-                            return (
-                              <span
-                                key={charIndex}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setCaret(charIndex);
-                                }}
-                                className={`
-                                  transition-all duration-150 select-none
-                                  ${rc.bold ? 'font-semibold' : ''}
-                                  ${rc.italic ? 'italic' : ''}
-                                  ${rc.code ? 'bg-muted px-1.5 py-0.5 rounded text-sm font-mono' : ''}
-                                  ${rc.strike ? 'line-through' : ''}
-                                  ${rc.link ? 'text-primary underline' : ''}
-                                  ${isCorrect ? 'text-primary/90 font-medium' : ''}
-                                  ${isError ? 'text-destructive bg-destructive/20 px-0.5 rounded' : ''}
-                                  ${isCaret ? 'bg-primary text-primary-foreground px-1 rounded-md shadow-lg' : ''}
-                                  ${!isCorrect && !isError && !isCaret ? 'text-foreground/40' : ''}
-                                `}
-                              >
-                                {rc.char === ' ' ? '\u00A0' : rc.char}
-                              </span>
-                            );
-                          })}
+                          {getTTSSegments(renderedChars.length, lineIndex, ttsHighlight).map((seg) => (
+                            <span
+                              key={`${seg.start}-${seg.end}`}
+                              className={seg.highlighted ? 'border-b-2 border-primary font-semibold bg-primary/10 px-1 rounded text-[1.05em] transition-all' : ''}
+                            >
+                              {renderedChars.slice(seg.start, seg.end).map((rc, relIdx) => {
+                                const idx = seg.start + relIdx;
+                                const isCorrect = typingState.correctChars.has(idx);
+                                const isError = typingState.errorChars.has(idx);
+                                const isCaret = idx === typingState.caretIndex;
+                                return (
+                                  <span
+                                    key={idx}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setCaret(idx);
+                                    }}
+                                    className={`
+                                      transition-all duration-150 select-none
+                                      ${rc.bold ? 'font-semibold' : ''}
+                                      ${rc.italic ? 'italic' : ''}
+                                      ${rc.code ? 'bg-muted px-1.5 py-0.5 rounded text-sm font-mono' : ''}
+                                      ${rc.strike ? 'line-through' : ''}
+                                      ${rc.link ? 'text-primary underline' : ''}
+                                      ${isCorrect ? 'text-primary/90 font-medium' : ''}
+                                      ${isError ? 'text-destructive bg-destructive/20 px-0.5 rounded' : ''}
+                                      ${isCaret ? 'bg-primary text-primary-foreground px-1 rounded-md shadow-lg' : ''}
+                                      ${!isCorrect && !isError && !isCaret ? 'text-foreground/40' : ''}
+                                    `}
+                                  >
+                                    {rc.char === ' ' ? '\u00A0' : rc.char}
+                                  </span>
+                                );
+                              })}
+                            </span>
+                          ))}
                           {typingState.caretIndex === renderedChars.length && (
                             <span
                               onClick={(e) => {
@@ -832,7 +858,24 @@ export default function TypingTrainer({
                         </div>
                       ) : (
                         <div className={isPast ? 'line-through opacity-70' : ''}>
-                          <MarkdownLine content={line.text || '\u00A0'} />
+                          {ttsHighlight?.lineIndex === lineIndex ? (
+                            <div className={lineStyle}>
+                              {getTTSSegments(renderedChars.length, lineIndex, ttsHighlight).map((seg) => (
+                                <span
+                                  key={`${seg.start}-${seg.end}`}
+                                  className={seg.highlighted ? 'border-b-2 border-primary font-semibold bg-primary/10 px-1 rounded text-[1.05em] transition-all' : ''}
+                                >
+                                  {renderedChars.slice(seg.start, seg.end).map((rc, relIdx) => (
+                                    <span key={relIdx}>
+                                      {rc.char === ' ' ? '\u00A0' : rc.char}
+                                    </span>
+                                  ))}
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <MarkdownLine content={line.text || '\u00A0'} />
+                          )}
                         </div>
                       )}
                     </div>
@@ -1052,4 +1095,56 @@ function parseInlineChars(text: string): RenderedChar[] {
     remaining = remaining.slice(1);
   }
   return chars;
+}
+
+function getTTSSegments(
+  length: number,
+  lineIndex: number,
+  highlight: { lineIndex: number; start: number; end: number } | null
+): { start: number; end: number; highlighted: boolean }[] {
+  if (!highlight || highlight.lineIndex !== lineIndex) {
+    return [{ start: 0, end: length, highlighted: false }];
+  }
+
+  const segments: { start: number; end: number; highlighted: boolean }[] = [];
+  let i = 0;
+  while (i < length) {
+    const hl = i >= highlight.start && i < highlight.end;
+    let j = i + 1;
+    while (j < length && (j >= highlight.start && j < highlight.end) === hl) {
+      j++;
+    }
+    segments.push({ start: i, end: j, highlighted: hl });
+    i = j;
+  }
+  return segments;
+}
+
+function findWordBounds(text: string, index: number): { start: number; end: number } {
+  let start = index;
+  while (start > 0 && !/[\s,.!?;:\-—]/.test(text[start - 1])) start--;
+  let end = index;
+  while (end < text.length && !/[\s,.!?;:\-—]/.test(text[end])) end++;
+  return { start, end };
+}
+
+function mapCharIndexToLinePosition(
+  globalIndex: number,
+  charLength: number,
+  startLineIndex: number,
+  lines: Line[]
+): { lineIndex: number; start: number; end: number } | null {
+  let current = 0;
+  for (let i = startLineIndex; i < lines.length; i++) {
+    const rendered = getRenderedText(lines[i].text);
+    if (rendered.length === 0) continue;
+    if (globalIndex >= current && globalIndex < current + rendered.length) {
+      const localStart = globalIndex - current;
+      const localEnd = Math.min(rendered.length, localStart + Math.max(1, charLength));
+      const { start, end } = findWordBounds(rendered, localStart);
+      return { lineIndex: i, start, end: Math.max(end, localEnd) };
+    }
+    current += rendered.length + 1; // +1 for space joiner in multi-line playback
+  }
+  return null;
 }
