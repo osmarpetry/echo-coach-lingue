@@ -119,6 +119,18 @@ export default function TypingTrainer({
     localStorage.setItem('loopInactivityEnabled', String(loopInactivityEnabled));
   }, [loopInactivityEnabled]);
 
+  // Stop all loops and TTS when component unmounts (e.g., route/screen change)
+  useEffect(() => {
+    return () => {
+      loopAbortRef.current = true;
+      if (inactivityTimerRef.current) {
+        clearTimeout(inactivityTimerRef.current);
+        inactivityTimerRef.current = null;
+      }
+      window.speechSynthesis.cancel();
+    };
+  }, []);
+
   // Auto-focus and scroll
   useEffect(() => {
     if (!isEditMode) {
