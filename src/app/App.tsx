@@ -13,6 +13,8 @@ export interface TTSSettings {
   autoplayNextLine: boolean;
   loopCurrentLine: boolean;
   loopCount: number;
+  soundEnabled: boolean;
+  soundVolume: number;
 }
 
 export default function App() {
@@ -29,6 +31,8 @@ export default function App() {
     autoplayNextLine: false,
     loopCurrentLine: false,
     loopCount: 1,
+    soundEnabled: true,
+    soundVolume: 0.5,
   });
 
   // Load persisted data on mount
@@ -40,7 +44,12 @@ export default function App() {
       setSourceText(savedText);
     }
     if (savedSettings) {
-      setTTSSettings(JSON.parse(savedSettings));
+      try {
+        const parsed = JSON.parse(savedSettings);
+        setTTSSettings(prev => ({ ...prev, ...parsed }));
+      } catch {
+        // ignore parse errors
+      }
     }
   }, []);
 
@@ -65,6 +74,11 @@ export default function App() {
     setShowTTSModal(true);
   };
 
+  const handleSourceTextChange = (text: string) => {
+    setSourceText(text);
+    localStorage.setItem('sourceText', text);
+  };
+
   return (
     <div className="size-full">
       {screen === 'paste' && (
@@ -77,6 +91,7 @@ export default function App() {
           ttsSettings={ttsSettings}
           onRestart={handleRestart}
           onSettingsOpen={handleSettingsOpen}
+          onSourceTextChange={handleSourceTextChange}
         />
       )}
 

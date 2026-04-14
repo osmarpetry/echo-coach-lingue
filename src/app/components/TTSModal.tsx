@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Switch from '@radix-ui/react-switch';
 import * as Slider from '@radix-ui/react-slider';
-import { X, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, ChevronDown, ChevronUp, Volume2 } from 'lucide-react';
 import { TTSSettings } from '../App';
 
 interface TTSModalProps {
@@ -51,7 +51,7 @@ export default function TTSModal({ open, onClose, onConfirm, initialSettings }: 
                 Text-to-Speech Settings
               </Dialog.Title>
               <Dialog.Description className="text-muted-foreground text-sm sm:text-base">
-                Configure voice and playback options
+                Configure voice, playback, and sound options
               </Dialog.Description>
             </div>
             <Dialog.Close asChild>
@@ -121,7 +121,7 @@ export default function TTSModal({ open, onClose, onConfirm, initialSettings }: 
             {/* Volume */}
             <div>
               <label className="block mb-2 text-sm sm:text-base text-foreground/90 font-medium">
-                Volume: {Math.round(settings.volume * 100)}%
+                TTS Volume: {Math.round(settings.volume * 100)}%
               </label>
               <Slider.Root
                 className="relative flex items-center w-full h-8 sm:h-10"
@@ -177,6 +177,39 @@ export default function TTSModal({ open, onClose, onConfirm, initialSettings }: 
                   />
                 </div>
               )}
+            </div>
+
+            {/* Sound Settings */}
+            <div className="border-t border-border/50 pt-5 sm:pt-6 space-y-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Volume2 className="w-4 h-4 text-primary" />
+                <span className="text-sm sm:text-base font-medium text-foreground/90">Typing Sound Feedback</span>
+              </div>
+
+              <SwitchField
+                label="Enable typing sounds"
+                checked={settings.soundEnabled}
+                onCheckedChange={(checked) => setSettings({ ...settings, soundEnabled: checked })}
+              />
+
+              <div>
+                <label className="block mb-2 text-xs sm:text-sm text-foreground/90 font-medium">
+                  Sound Volume: {Math.round((settings.soundVolume ?? 0.5) * 100)}%
+                </label>
+                <Slider.Root
+                  className="relative flex items-center w-full h-8 sm:h-10"
+                  value={[settings.soundVolume ?? 0.5]}
+                  onValueChange={([soundVolume]) => setSettings({ ...settings, soundVolume })}
+                  min={0}
+                  max={1}
+                  step={0.05}
+                >
+                  <Slider.Track className="relative grow h-2 backdrop-blur-md bg-secondary rounded-full">
+                    <Slider.Range className="absolute h-full bg-primary rounded-full" />
+                  </Slider.Track>
+                  <Slider.Thumb className="block w-6 h-6 bg-white border-2 border-primary rounded-full shadow-lg focus:outline-none focus:ring-2 focus:ring-primary transition-transform hover:scale-110" />
+                </Slider.Root>
+              </div>
             </div>
 
             {/* Advanced Section */}

@@ -6,11 +6,31 @@ interface PasteScreenProps {
   initialText: string;
 }
 
-const SAMPLE_FRENCH_TEXT = `Bonjour! Bienvenue à cette expérience d'apprentissage.
-Aujourd'hui nous allons pratiquer la frappe en français.
-C'est une excellente façon d'améliorer votre vitesse et votre précision.
-N'oubliez pas de faire attention aux accents et à la ponctuation.
-Bonne chance et amusez-vous bien!`;
+const SAMPLE_FRENCH_TEXT = `## Une Rencontre dans le Quartier
+
+**Léo :** Salut Alice ! Tu **vas** bien ?
+
+**Alice :** Oui, ça va très bien, merci ! Et toi ?
+
+**Léo :** Ça va. Je **vais** à la boulangerie du quartier. Tu habites ici maintenant ?
+
+**Alice :** Oui, j'habite ici. J'aime beaucoup ce quartier. Il y a un parc magnifique. Tu **vas** au parc **souvent** ?
+
+**Léo :** Oui, j'y **vais** tous les matins avec mon chien. Mes amis, Marc et Julie, **vont** aussi au parc **de temps en temps** pour faire du sport.
+
+**Alice :** C'est sympa ! Moi, je **vais** à la bibliothèque le samedi. Nous **allons** prendre un café ensemble ? Il y a un nouveau bistro juste là-bas.
+
+**Léo :** Bonne idée ! Vous **allez** au bistro avec moi ? Ah, regarde ! Voilà Marc et Julie. Ils **vont** au cinéma, je pense.
+
+**Alice :** Bonjour tout le monde ! On **va** prendre un café ?
+
+**Marc :** Ah, désolé ! Nous **allons** à la gare maintenant. Mais nous **allons** au café avec vous la semaine prochaine, promis !
+
+**Léo :** Pas de problème. À bientôt !
+
+**Alice :** Alors, on y **va** ?
+
+**Léo :** C'est parti !`;
 
 export default function PasteScreen({ onSubmit, initialText }: PasteScreenProps) {
   const [text, setText] = useState(initialText || SAMPLE_FRENCH_TEXT);
