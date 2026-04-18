@@ -87,9 +87,9 @@ export default function TTSModal({ open, onClose, onConfirm, initialSettings }: 
                 className="relative flex items-center w-full h-8 sm:h-10"
                 value={[settings.rate]}
                 onValueChange={([rate]) => setSettings({ ...settings, rate })}
-                min={0.5}
+                min={0.05}
                 max={2}
-                step={0.1}
+                step={0.05}
               >
                 <Slider.Track className="relative grow h-2 backdrop-blur-md bg-secondary rounded-full">
                   <Slider.Range className="absolute h-full bg-primary rounded-full" />
@@ -144,12 +144,6 @@ export default function TTSModal({ open, onClose, onConfirm, initialSettings }: 
                 label="Speak completed word while typing"
                 checked={settings.speakOnWordComplete}
                 onCheckedChange={(checked) => setSettings({ ...settings, speakOnWordComplete: checked })}
-              />
-
-              <SwitchField
-                label="Click a line to play that line"
-                checked={settings.clickLineToPlay}
-                onCheckedChange={(checked) => setSettings({ ...settings, clickLineToPlay: checked })}
               />
 
               <SwitchField

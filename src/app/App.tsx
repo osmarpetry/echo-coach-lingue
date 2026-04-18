@@ -9,7 +9,6 @@ export interface TTSSettings {
   pitch: number;
   volume: number;
   speakOnWordComplete: boolean;
-  clickLineToPlay: boolean;
   autoplayNextLine: boolean;
   loopCurrentLine: boolean;
   loopCount: number;
@@ -27,7 +26,6 @@ export default function App() {
     pitch: 1,
     volume: 1,
     speakOnWordComplete: true,
-    clickLineToPlay: true,
     autoplayNextLine: false,
     loopCurrentLine: false,
     loopCount: 1,
@@ -46,6 +44,7 @@ export default function App() {
     if (savedSettings) {
       try {
         const parsed = JSON.parse(savedSettings);
+        delete parsed.clickLineToPlay;
         setTTSSettings(prev => ({ ...prev, ...parsed }));
       } catch {
         // ignore parse errors
@@ -79,6 +78,11 @@ export default function App() {
     localStorage.setItem('sourceText', text);
   };
 
+  const handleTTSSettingsChange = (settings: TTSSettings) => {
+    setTTSSettings(settings);
+    localStorage.setItem('ttsSettings', JSON.stringify(settings));
+  };
+
   return (
     <div className="size-full">
       {screen === 'paste' && (
@@ -92,6 +96,7 @@ export default function App() {
           onRestart={handleRestart}
           onSettingsOpen={handleSettingsOpen}
           onSourceTextChange={handleSourceTextChange}
+          onTTSSettingsChange={handleTTSSettingsChange}
         />
       )}
 

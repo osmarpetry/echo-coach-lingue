@@ -1,7 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { RotateCcw, Settings, Play, Pause, Square, SkipBack, SkipForward, Volume2, Edit3, Check, Type, Repeat } from 'lucide-react';
+import { RotateCcw, Settings, Play, Pause, Square, SkipBack, SkipForward, Volume2, Edit3, Check, Type, Repeat, Gauge } from 'lucide-react';
 import { TTSSettings } from '../App';
+import * as Slider from '@radix-ui/react-slider';
 import MarkdownLine from './MarkdownLine';
+import PronunciationPopover from './PronunciationPopover';
+import { buildPronunciationLinks, type PronunciationLinks } from '../utils/pronunciationLinks';
 
 interface TypingTrainerProps {
   sourceText: string;
@@ -9,6 +12,7 @@ interface TypingTrainerProps {
   onRestart: () => void;
   onSettingsOpen: () => void;
   onSourceTextChange?: (text: string) => void;
+  onTTSSettingsChange?: (settings: TTSSettings) => void;
 }
 
 interface Line {
@@ -29,12 +33,27 @@ interface TypingState {
 
 type SoundType = 'key' | 'error' | 'wordComplete' | 'lineComplete' | 'click';
 
+type SpeechSource = 'line' | 'all' | 'word' | 'loop';
+
+interface SpeechPlaybackState {
+  status: 'idle' | 'playing' | 'paused';
+  source: SpeechSource | null;
+  lineIndex: number | null;
+}
+
+const IDLE_SPEECH_PLAYBACK_STATE: SpeechPlaybackState = {
+  status: 'idle',
+  source: null,
+  lineIndex: null,
+};
+
 export default function TypingTrainer({
   sourceText,
   ttsSettings,
   onRestart,
   onSettingsOpen,
   onSourceTextChange,
+  onTTSSettingsChange,
 }: TypingTrainerProps) {
   const [lines, setLines] = useState<Line[]>([]);
   const [typingState, setTypingState] = useState<TypingState>({
@@ -47,7 +66,7 @@ export default function TypingTrainer({
     errors: 0,
     totalCharsTyped: 0,
   });
-  const [isPlaying, setIsPlaying] = useState(false);
+  const [speechPlaybackState, setSpeechPlaybackState] = useState<SpeechPlaybackState>(IDLE_SPEECH_PLAYBACK_STATE);
   const [isEditMode, setIsEditMode] = useState(false);
   const [editText, setEditText] = useState(sourceText);
   const [loopInactivityEnabled, setLoopInactivityEnabled] = useState(() => {
@@ -59,12 +78,19 @@ export default function TypingTrainer({
   const activeLineRef = useRef<HTMLDivElement>(null);
   const focusRef = useRef<HTMLDivElement>(null);
   const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
+  const speechRequestIdRef = useRef(0);
   const loopCountRef = useRef(0);
   const inactivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loopAbortRef = useRef(false);
   const loopTextRef = useRef('');
   const audioCtxRef = useRef<AudioContext | null>(null);
   const loopInactivityEnabledRef = useRef(loopInactivityEnabled);
+  const speechPlaybackStateRef = useRef(speechPlaybackState);
+  const currentSpeakContextRef = useRef<{
+    text: string;
+    context?: { startLineIndex: number };
+    source: SpeechSource;
+  } | null>(null);
 
   // Refs for stable callback access
   const typingStateRef = useRef(typingState);
@@ -76,7 +102,18 @@ export default function TypingTrainer({
   linesRef.current = lines;
   ttsSettingsRef.current = ttsSettings;
   isEditModeRef.current = isEditMode;
+  speechPlaybackStateRef.current = speechPlaybackState;
   loopInactivityEnabledRef.current = loopInactivityEnabled;
+
+  const updateSpeechPlaybackState = useCallback((nextState: SpeechPlaybackState) => {
+    speechPlaybackStateRef.current = nextState;
+    setSpeechPlaybackState(nextState);
+  }, []);
+
+  const getPronunciationLinks = useCallback((word: string): PronunciationLinks | null => {
+    const voice = window.speechSynthesis.getVoices().find((v) => v.name === ttsSettingsRef.current.voice);
+    return buildPronunciationLinks(word, voice?.lang);
+  }, []);
 
   // Parse text into lines
   useEffect(() => {
@@ -313,7 +350,7 @@ export default function TypingTrainer({
                     }
                     if (settings.autoplayNextLine && nextLineIndex < linesRef.current.length) {
                       const nextLine = linesRef.current[nextLineIndex];
-                      if (nextLine) speak(getRenderedText(nextLine.text), undefined, { startLineIndex: nextLineIndex });
+                      if (nextLine) speak(getRenderedText(nextLine.text), undefined, { startLineIndex: nextLineIndex }, 'line');
                     }
                     setTypingState((p) => ({
                       ...p,
@@ -332,7 +369,7 @@ export default function TypingTrainer({
                 if (completedWord && completedWord !== prev.lastSpokenWord && ttsSettingsRef.current.speakOnWordComplete) {
                   speak(completedWord, () => {
                     startInactivityLoop(renderedText, newCaret);
-                  }, { startLineIndex: typingStateRef.current.currentLineIndex });
+                  }, { startLineIndex: typingStateRef.current.currentLineIndex }, 'word');
                 }
 
                 return {
@@ -448,10 +485,22 @@ export default function TypingTrainer({
   );
 
   const speak = useCallback(
-    (text: string, onEnd?: () => void, context?: { startLineIndex: number }) => {
-      if (!text) return;
+    (
+      text: string,
+      onEnd?: () => void,
+      context?: { startLineIndex: number },
+      source: SpeechSource = 'line'
+    ) => {
+      if (!text.trim()) return;
+      const requestId = ++speechRequestIdRef.current;
       window.speechSynthesis.cancel();
       setTtsHighlight(null);
+      currentSpeakContextRef.current = { text, context, source };
+      updateSpeechPlaybackState({
+        status: 'playing',
+        source,
+        lineIndex: context?.startLineIndex ?? null,
+      });
 
       const utterance = new SpeechSynthesisUtterance(text);
       const voice = window.speechSynthesis.getVoices().find((v) => v.name === ttsSettingsRef.current.voice);
@@ -461,6 +510,7 @@ export default function TypingTrainer({
       utterance.volume = ttsSettingsRef.current.volume;
 
       utterance.onboundary = (e) => {
+        if (requestId !== speechRequestIdRef.current) return;
         if (e.name === 'word' && context) {
           const mapped = mapCharIndexToLinePosition(e.charIndex, e.charLength || 0, context.startLineIndex, linesRef.current);
           if (mapped) setTtsHighlight(mapped);
@@ -468,31 +518,65 @@ export default function TypingTrainer({
       };
 
       utterance.onend = () => {
+        if (requestId !== speechRequestIdRef.current) return;
         setTtsHighlight(null);
+        utteranceRef.current = null;
+        currentSpeakContextRef.current = null;
+        updateSpeechPlaybackState(IDLE_SPEECH_PLAYBACK_STATE);
         if (onEnd) onEnd();
       };
 
       utterance.onerror = () => {
+        if (requestId !== speechRequestIdRef.current) return;
         setTtsHighlight(null);
+        utteranceRef.current = null;
+        currentSpeakContextRef.current = null;
+        updateSpeechPlaybackState(IDLE_SPEECH_PLAYBACK_STATE);
       };
 
       utteranceRef.current = utterance;
       window.speechSynthesis.speak(utterance);
-      setIsPlaying(true);
     },
-    []
+    [updateSpeechPlaybackState]
   );
 
   const stopSpeaking = useCallback(() => {
+    speechRequestIdRef.current++;
     window.speechSynthesis.cancel();
-    setIsPlaying(false);
     loopAbortRef.current = true;
     setTtsHighlight(null);
+    utteranceRef.current = null;
+    currentSpeakContextRef.current = null;
+    updateSpeechPlaybackState(IDLE_SPEECH_PLAYBACK_STATE);
     if (inactivityTimerRef.current) {
       clearTimeout(inactivityTimerRef.current);
       inactivityTimerRef.current = null;
     }
-  }, []);
+  }, [updateSpeechPlaybackState]);
+
+  const pauseSpeech = useCallback(() => {
+    const state = speechPlaybackStateRef.current;
+    if (state.status !== 'playing') return;
+    window.speechSynthesis.pause();
+    updateSpeechPlaybackState({ ...state, status: 'paused' });
+  }, [updateSpeechPlaybackState]);
+
+  const resumeSpeech = useCallback(() => {
+    const state = speechPlaybackStateRef.current;
+    if (state.status !== 'paused') return;
+    window.speechSynthesis.resume();
+    updateSpeechPlaybackState({ ...state, status: 'playing' });
+  }, [updateSpeechPlaybackState]);
+
+  const toggleSpeechPause = useCallback(() => {
+    playSound('click');
+    const state = speechPlaybackStateRef.current;
+    if (state.status === 'playing') {
+      pauseSpeech();
+    } else if (state.status === 'paused') {
+      resumeSpeech();
+    }
+  }, [pauseSpeech, playSound, resumeSpeech]);
 
   const checkWordCompletion = useCallback((line: string, caretIndex: number) => {
     if (caretIndex === 0) return null;
@@ -538,13 +622,40 @@ export default function TypingTrainer({
               if (loopAbortRef.current) return;
               doLoop();
             }, 2000);
-          }, context);
+          }, context, 'loop');
         };
         doLoop();
       }, 2000);
     },
     [speak]
   );
+
+  // Restart current speech when voice settings change so playback uses the latest settings.
+  useEffect(() => {
+    ttsSettingsRef.current = ttsSettings;
+    const playbackState = speechPlaybackStateRef.current;
+    const ctx = currentSpeakContextRef.current;
+
+    if (playbackState.status !== 'playing' || !ctx) return;
+
+    if (ctx.source === 'loop' && loopTextRef.current) {
+      loopAbortRef.current = false;
+      const doLoop = () => {
+        if (loopAbortRef.current || !loopTextRef.current) return;
+        speak(loopTextRef.current, () => {
+          if (loopAbortRef.current) return;
+          inactivityTimerRef.current = setTimeout(() => {
+            if (loopAbortRef.current) return;
+            doLoop();
+          }, 2000);
+        }, ctx.context, 'loop');
+      };
+      doLoop();
+      return;
+    }
+
+    speak(ctx.text, undefined, ctx.context, ctx.source);
+  }, [ttsSettings.pitch, ttsSettings.rate, ttsSettings.volume, speak]);
 
   const stopInactivityLoop = useCallback(() => {
     loopAbortRef.current = true;
@@ -553,22 +664,58 @@ export default function TypingTrainer({
       clearTimeout(inactivityTimerRef.current);
       inactivityTimerRef.current = null;
     }
+    speechRequestIdRef.current++;
     window.speechSynthesis.cancel();
-    setIsPlaying(false);
-  }, []);
+    utteranceRef.current = null;
+    currentSpeakContextRef.current = null;
+    updateSpeechPlaybackState(IDLE_SPEECH_PLAYBACK_STATE);
+  }, [updateSpeechPlaybackState]);
 
-  const handleLineClick = useCallback(
-    (lineIndex: number) => {
-      playSound('click');
-      if (ttsSettingsRef.current.clickLineToPlay) {
-        const line = linesRef.current[lineIndex];
-        if (line) {
-          const rendered = getRenderedText(line.text);
-          if (rendered) speak(rendered, undefined, { startLineIndex: lineIndex });
-        }
+  const startLinePlayback = useCallback(
+    (lineIndex: number, withConfiguredLoop = false) => {
+      const line = linesRef.current[lineIndex];
+      if (!line) return;
+
+      const rendered = getRenderedText(line.text);
+      if (!rendered.trim()) return;
+
+      stopSpeaking();
+      const context = { startLineIndex: lineIndex };
+
+      if (withConfiguredLoop && ttsSettingsRef.current.loopCurrentLine && ttsSettingsRef.current.loopCount > 1) {
+        loopCountRef.current = 0;
+        const playLoop = () => {
+          loopCountRef.current++;
+          const hasMore = loopCountRef.current < ttsSettingsRef.current.loopCount;
+          speak(rendered, hasMore ? playLoop : undefined, context, 'line');
+        };
+        playLoop();
+      } else {
+        speak(rendered, undefined, context, 'line');
       }
     },
-    [speak, playSound]
+    [speak, stopSpeaking]
+  );
+
+  const toggleLinePlayback = useCallback(
+    (lineIndex: number) => {
+      playSound('click');
+      const state = speechPlaybackStateRef.current;
+      const isSameLine = state.source === 'line' && state.lineIndex === lineIndex;
+
+      if (isSameLine && state.status === 'playing') {
+        pauseSpeech();
+        return;
+      }
+
+      if (isSameLine && state.status === 'paused') {
+        resumeSpeech();
+        return;
+      }
+
+      startLinePlayback(lineIndex);
+    },
+    [pauseSpeech, playSound, resumeSpeech, startLinePlayback]
   );
 
   const playAll = useCallback(() => {
@@ -579,38 +726,23 @@ export default function TypingTrainer({
       .map((l) => getRenderedText(l.text))
       .filter((t) => t.length > 0)
       .join(' ');
-    speak(remainingText, undefined, { startLineIndex: typingStateRef.current.currentLineIndex });
+    speak(remainingText, undefined, { startLineIndex: typingStateRef.current.currentLineIndex }, 'all');
   }, [speak, stopSpeaking, playSound]);
 
   const playLine = useCallback(() => {
     playSound('click');
-    stopSpeaking();
-    const currentLine = linesRef.current[typingStateRef.current.currentLineIndex];
-    if (currentLine) {
-      const rendered = getRenderedText(currentLine.text);
-      if (!rendered) return;
-      const context = { startLineIndex: typingStateRef.current.currentLineIndex };
-      if (ttsSettingsRef.current.loopCurrentLine && ttsSettingsRef.current.loopCount > 1) {
-        loopCountRef.current = 0;
-        const playLoop = () => {
-          loopCountRef.current++;
-          if (loopCountRef.current < ttsSettingsRef.current.loopCount) {
-            speak(rendered, playLoop, context);
-          } else {
-            speak(rendered, undefined, context);
-          }
-        };
-        playLoop();
-      } else {
-        speak(rendered, undefined, context);
-      }
-    }
-  }, [speak, stopSpeaking, playSound]);
+    startLinePlayback(typingStateRef.current.currentLineIndex, true);
+  }, [playSound, startLinePlayback]);
 
   const replayWord = useCallback(() => {
     playSound('click');
     if (typingStateRef.current.lastSpokenWord) {
-      speak(typingStateRef.current.lastSpokenWord, undefined, { startLineIndex: typingStateRef.current.currentLineIndex });
+      speak(
+        typingStateRef.current.lastSpokenWord,
+        undefined,
+        { startLineIndex: typingStateRef.current.currentLineIndex },
+        'word'
+      );
     }
   }, [speak, playSound]);
 
@@ -686,6 +818,7 @@ export default function TypingTrainer({
         correctChars: new Set(),
         errorChars: new Set(),
         lastSpokenWord: '',
+        wordsTyped: 0,
         errors: 0,
         totalCharsTyped: 0,
       });
@@ -701,7 +834,138 @@ export default function TypingTrainer({
     focusRef.current?.focus();
   }, []);
 
+  const renderLinePlaybackButton = (lineIndex: number, renderedText: string) => {
+    if (!renderedText.trim()) {
+      return <div className="mt-1 h-8 w-8 shrink-0 sm:h-9 sm:w-9" aria-hidden="true" />;
+    }
+
+    const isSameLine = speechPlaybackState.source === 'line' && speechPlaybackState.lineIndex === lineIndex;
+    const isLinePlaying = isSameLine && speechPlaybackState.status === 'playing';
+    const isLinePaused = isSameLine && speechPlaybackState.status === 'paused';
+    const label = isLinePlaying ? 'Pause line' : isLinePaused ? 'Resume line' : 'Play line';
+    const Icon = isLinePlaying ? Pause : Play;
+
+    return (
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          toggleLinePlayback(lineIndex);
+        }}
+        aria-label={label}
+        title={label}
+        className={`mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-all active:scale-95 sm:h-9 sm:w-9 ${
+          isLinePlaying
+            ? 'bg-primary text-primary-foreground shadow-md'
+            : 'backdrop-blur-md bg-secondary text-secondary-foreground hover:bg-accent/60'
+        }`}
+      >
+        <Icon className="h-4 w-4" />
+      </button>
+    );
+  };
+
+  const renderRenderedTokens = (renderedChars: RenderedChar[], lineIndex: number, isActive: boolean) => {
+    return groupRenderedChars(renderedChars).map((token) => {
+      const key = `${token.type}-${token.start}-${token.end}`;
+      const isHighlighted =
+        ttsHighlight?.lineIndex === lineIndex &&
+        token.start < ttsHighlight.end &&
+        token.end > ttsHighlight.start;
+      const ttsHighlightClass = isHighlighted
+        ? 'border-primary font-semibold bg-primary/10 px-1 rounded text-[1.05em]'
+        : '';
+
+      if (token.type === 'link' && token.href) {
+        return (
+          <a
+            key={key}
+            href={token.href}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(event) => event.stopPropagation()}
+            className={`inline ${ttsHighlightClass}`}
+          >
+            {renderRenderedCharRange(renderedChars, lineIndex, token.start, token.end, isActive, false)}
+          </a>
+        );
+      }
+
+      if (token.type === 'word') {
+        const word = renderedChars.slice(token.start, token.end).map((rc) => rc.char).join('');
+        const links = getPronunciationLinks(word);
+        const content = renderRenderedCharRange(renderedChars, lineIndex, token.start, token.end, isActive, false);
+
+        if (links) {
+          return (
+            <PronunciationPopover
+              key={key}
+              links={links}
+              className={ttsHighlightClass}
+            >
+              {content}
+            </PronunciationPopover>
+          );
+        }
+
+        return <span key={key} className={ttsHighlightClass}>{content}</span>;
+      }
+
+      return (
+        <span key={key}>
+          {renderRenderedCharRange(renderedChars, lineIndex, token.start, token.end, isActive, true)}
+        </span>
+      );
+    });
+  };
+
+  const renderRenderedCharRange = (
+    renderedChars: RenderedChar[],
+    lineIndex: number,
+    start: number,
+    end: number,
+    isActive: boolean,
+    allowCaretClick: boolean
+  ) => {
+    return renderedChars.slice(start, end).map((rc, relIdx) => {
+      const idx = start + relIdx;
+      const isCorrect = isActive && typingState.correctChars.has(idx);
+      const isError = isActive && typingState.errorChars.has(idx);
+      const isCaret = isActive && idx === typingState.caretIndex;
+
+      return (
+        <span
+          key={idx}
+          onClick={
+            allowCaretClick
+              ? (event) => {
+                  event.stopPropagation();
+                  setCaret(idx);
+                }
+              : undefined
+          }
+          className={`
+            transition-all duration-150 select-none
+            ${allowCaretClick ? 'cursor-text' : ''}
+            ${rc.bold ? 'font-semibold' : ''}
+            ${rc.italic ? 'italic' : ''}
+            ${rc.code ? 'bg-muted px-1.5 py-0.5 rounded text-sm font-mono' : ''}
+            ${rc.strike ? 'line-through' : ''}
+            ${rc.link ? 'text-primary underline' : ''}
+            ${isCorrect ? 'text-primary/90 font-medium' : ''}
+            ${isError ? 'text-destructive bg-destructive/20 px-0.5 rounded' : ''}
+            ${isCaret ? 'bg-primary text-primary-foreground px-1 rounded-md shadow-lg' : ''}
+            ${isActive && !isCorrect && !isError && !isCaret ? 'text-foreground/40' : ''}
+          `}
+        >
+          {rc.char === ' ' ? '\u00A0' : rc.char}
+        </span>
+      );
+    });
+  };
+
   const currentLine = lines[typingState.currentLineIndex];
+  const currentLineHasText = currentLine ? getRenderedText(currentLine.text).trim().length > 0 : false;
   const totalWords = typingState.wordsTyped;
   const accuracy =
     typingState.totalCharsTyped > 0
@@ -790,94 +1054,52 @@ export default function TypingTrainer({
                   const isPast = lineIndex < typingState.currentLineIndex;
                   const isFuture = lineIndex > typingState.currentLineIndex;
                   const renderedChars = parseRenderedChars(line.text);
+                  const renderedText = renderedChars.map((rc) => rc.char).join('');
                   const lineStyle = getLineStyleClass(line.text);
 
                   return (
                     <div
                       key={line.index}
                       ref={isActive ? activeLineRef : null}
-                      onClick={() => handleLineClick(lineIndex)}
                       className={`
-                        p-3 sm:p-4 rounded-xl transition-all cursor-pointer
+                        p-3 sm:p-4 rounded-xl transition-all
                         ${isActive ? 'backdrop-blur-xl bg-accent/40 border-2 border-primary/50 shadow-xl scale-[1.01]' : ''}
                         ${isPast ? 'opacity-50 backdrop-blur-sm bg-white/20' : ''}
                         ${isFuture ? 'opacity-30' : ''}
-                        ${ttsSettings.clickLineToPlay ? 'hover:backdrop-blur-lg hover:bg-accent/20' : ''}
                       `}
                       style={{ fontFamily: 'var(--font-content)', fontSize: 'clamp(1.125rem, 4vw, 1.5rem)', lineHeight: '1.8' }}
                     >
-                      {isActive ? (
-                        <div className={`flex flex-wrap ${lineStyle}`}>
-                          {getTTSSegments(renderedChars.length, lineIndex, ttsHighlight).map((seg) => (
-                            <span
-                              key={`${seg.start}-${seg.end}`}
-                              className={seg.highlighted ? 'border-b-2 border-primary font-semibold bg-primary/10 px-1 rounded text-[1.05em] transition-all' : ''}
-                            >
-                              {renderedChars.slice(seg.start, seg.end).map((rc, relIdx) => {
-                                const idx = seg.start + relIdx;
-                                const isCorrect = typingState.correctChars.has(idx);
-                                const isError = typingState.errorChars.has(idx);
-                                const isCaret = idx === typingState.caretIndex;
-                                return (
-                                  <span
-                                    key={idx}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      setCaret(idx);
-                                    }}
-                                    className={`
-                                      transition-all duration-150 select-none
-                                      ${rc.bold ? 'font-semibold' : ''}
-                                      ${rc.italic ? 'italic' : ''}
-                                      ${rc.code ? 'bg-muted px-1.5 py-0.5 rounded text-sm font-mono' : ''}
-                                      ${rc.strike ? 'line-through' : ''}
-                                      ${rc.link ? 'text-primary underline' : ''}
-                                      ${isCorrect ? 'text-primary/90 font-medium' : ''}
-                                      ${isError ? 'text-destructive bg-destructive/20 px-0.5 rounded' : ''}
-                                      ${isCaret ? 'bg-primary text-primary-foreground px-1 rounded-md shadow-lg' : ''}
-                                      ${!isCorrect && !isError && !isCaret ? 'text-foreground/40' : ''}
-                                    `}
-                                  >
-                                    {rc.char === ' ' ? '\u00A0' : rc.char}
-                                  </span>
-                                );
-                              })}
-                            </span>
-                          ))}
-                          {typingState.caretIndex === renderedChars.length && (
-                            <span
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setCaret(renderedChars.length);
-                              }}
-                              className="bg-primary text-primary-foreground px-1 rounded-md shadow-lg select-none"
-                            >
-                              {'\u00A0'}
-                            </span>
-                          )}
-                        </div>
-                      ) : (
-                        <div className={isPast ? 'line-through opacity-70' : ''}>
-                          {ttsHighlight?.lineIndex === lineIndex ? (
-                            <div className={lineStyle}>
-                              {getTTSSegments(renderedChars.length, lineIndex, ttsHighlight).map((seg) => (
+                      <div className="flex items-start gap-2 sm:gap-3">
+                        {renderLinePlaybackButton(lineIndex, renderedText)}
+                        <div className="min-w-0 flex-1">
+                          {isActive ? (
+                            <div className={`flex flex-wrap ${lineStyle}`}>
+                              {renderRenderedTokens(renderedChars, lineIndex, true)}
+                              {typingState.caretIndex === renderedChars.length && (
                                 <span
-                                  key={`${seg.start}-${seg.end}`}
-                                  className={seg.highlighted ? 'border-b-2 border-primary font-semibold bg-primary/10 px-1 rounded text-[1.05em] transition-all' : ''}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setCaret(renderedChars.length);
+                                  }}
+                                  className="bg-primary text-primary-foreground px-1 rounded-md shadow-lg select-none cursor-text"
                                 >
-                                  {renderedChars.slice(seg.start, seg.end).map((rc, relIdx) => (
-                                    <span key={relIdx}>
-                                      {rc.char === ' ' ? '\u00A0' : rc.char}
-                                    </span>
-                                  ))}
+                                  {'\u00A0'}
                                 </span>
-                              ))}
+                              )}
                             </div>
                           ) : (
-                            <MarkdownLine content={line.text || '\u00A0'} />
+                            <div className={isPast ? 'line-through opacity-70' : ''}>
+                              {ttsHighlight?.lineIndex === lineIndex ? (
+                                <div className={lineStyle}>
+                                  {renderRenderedTokens(renderedChars, lineIndex, false)}
+                                </div>
+                              ) : (
+                                <MarkdownLine content={line.text || '\u00A0'} getPronunciationLinks={getPronunciationLinks} />
+                              )}
+                            </div>
                           )}
                         </div>
-                      )}
+                      </div>
                     </div>
                   );
                 })}
@@ -909,7 +1131,57 @@ export default function TypingTrainer({
             </div>
           </div>
 
-          <div className="px-3 sm:px-6 py-3 sm:py-4 flex items-center justify-center gap-1.5 sm:gap-2 overflow-x-auto">
+          <div className="px-3 sm:px-6 py-2 sm:py-3 border-t border-border/30">
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3 sm:gap-5">
+              {/* Rate slider */}
+              <div className="flex items-center gap-2 w-full sm:w-auto sm:flex-1 sm:max-w-[16rem]">
+                <Gauge className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                <span className="text-xs text-muted-foreground flex-shrink-0">{ttsSettings.rate.toFixed(1)}x</span>
+                <Slider.Root
+                  className="relative flex items-center w-full h-6"
+                  value={[ttsSettings.rate]}
+                  onValueChange={([rate]) => {
+                    if (onTTSSettingsChange) {
+                      onTTSSettingsChange({ ...ttsSettings, rate });
+                    }
+                  }}
+                  min={0.05}
+                  max={2}
+                  step={0.05}
+                >
+                  <Slider.Track className="relative grow h-1.5 backdrop-blur-md bg-secondary rounded-full">
+                    <Slider.Range className="absolute h-full bg-primary rounded-full" />
+                  </Slider.Track>
+                  <Slider.Thumb className="block w-4 h-4 bg-white border-2 border-primary rounded-full shadow focus:outline-none focus:ring-2 focus:ring-primary transition-transform hover:scale-110" />
+                </Slider.Root>
+              </div>
+
+              {/* Volume slider */}
+              <div className="flex items-center gap-2 w-full sm:w-auto sm:flex-1 sm:max-w-[16rem]">
+                <Volume2 className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                <span className="text-xs text-muted-foreground flex-shrink-0">{Math.round(ttsSettings.volume * 100)}%</span>
+                <Slider.Root
+                  className="relative flex items-center w-full h-6"
+                  value={[ttsSettings.volume]}
+                  onValueChange={([volume]) => {
+                    if (onTTSSettingsChange) {
+                      onTTSSettingsChange({ ...ttsSettings, volume });
+                    }
+                  }}
+                  min={0}
+                  max={1}
+                  step={0.1}
+                >
+                  <Slider.Track className="relative grow h-1.5 backdrop-blur-md bg-secondary rounded-full">
+                    <Slider.Range className="absolute h-full bg-primary rounded-full" />
+                  </Slider.Track>
+                  <Slider.Thumb className="block w-4 h-4 bg-white border-2 border-primary rounded-full shadow focus:outline-none focus:ring-2 focus:ring-primary transition-transform hover:scale-110" />
+                </Slider.Root>
+              </div>
+            </div>
+          </div>
+
+          <div className="px-3 sm:px-6 py-3 sm:py-4 flex items-center justify-center gap-1.5 sm:gap-2 overflow-x-auto border-t border-border/30">
             <div className="flex gap-1.5 sm:gap-2">
               <button
                 onClick={playAll}
@@ -920,8 +1192,9 @@ export default function TypingTrainer({
               </button>
               <button
                 onClick={playLine}
-                className="p-2 sm:p-3 backdrop-blur-md bg-secondary text-secondary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all"
+                className="p-2 sm:p-3 backdrop-blur-md bg-secondary text-secondary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Play Line"
+                disabled={!currentLineHasText}
               >
                 <Volume2 className="w-4 h-4 sm:w-5 sm:h-5" />
               </button>
@@ -934,11 +1207,16 @@ export default function TypingTrainer({
                 <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
               </button>
               <button
-                onClick={stopSpeaking}
-                className="p-2 sm:p-3 backdrop-blur-md bg-secondary text-secondary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all"
-                title="Pause"
+                onClick={toggleSpeechPause}
+                className="p-2 sm:p-3 backdrop-blur-md bg-secondary text-secondary-foreground rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                title={speechPlaybackState.status === 'paused' ? 'Resume' : 'Pause'}
+                disabled={speechPlaybackState.status === 'idle'}
               >
-                <Pause className="w-4 h-4 sm:w-5 sm:h-5" />
+                {speechPlaybackState.status === 'paused' ? (
+                  <Play className="w-4 h-4 sm:w-5 sm:h-5" />
+                ) : (
+                  <Pause className="w-4 h-4 sm:w-5 sm:h-5" />
+                )}
               </button>
               <button
                 onClick={stopSpeaking}
@@ -1001,6 +1279,14 @@ interface RenderedChar {
   code?: boolean;
   strike?: boolean;
   link?: boolean;
+  linkHref?: string;
+}
+
+interface RenderedToken {
+  type: 'word' | 'separator' | 'link';
+  start: number;
+  end: number;
+  href?: string;
 }
 
 function parseRenderedChars(raw: string): RenderedChar[] {
@@ -1086,7 +1372,7 @@ function parseInlineChars(text: string): RenderedChar[] {
 
     const linkMatch = remaining.match(/^\[([^\]]+)\]\(([^)]+)\)/);
     if (linkMatch) {
-      addChars(linkMatch[1], { link: true });
+      addChars(linkMatch[1], { link: true, linkHref: linkMatch[2] });
       remaining = remaining.slice(linkMatch[0].length);
       continue;
     }
@@ -1097,27 +1383,68 @@ function parseInlineChars(text: string): RenderedChar[] {
   return chars;
 }
 
-function getTTSSegments(
-  length: number,
-  lineIndex: number,
-  highlight: { lineIndex: number; start: number; end: number } | null
-): { start: number; end: number; highlighted: boolean }[] {
-  if (!highlight || highlight.lineIndex !== lineIndex) {
-    return [{ start: 0, end: length, highlighted: false }];
+function groupRenderedChars(chars: RenderedChar[]): RenderedToken[] {
+  const tokens: RenderedToken[] = [];
+  let index = 0;
+
+  while (index < chars.length) {
+    const current = chars[index];
+
+    if (current.link && current.linkHref) {
+      const start = index;
+      const href = current.linkHref;
+      index++;
+      while (index < chars.length && chars[index].linkHref === href) index++;
+      tokens.push({ type: 'link', start, end: index, href });
+      continue;
+    }
+
+    if (canStartPronunciationWord(current)) {
+      const start = index;
+      index++;
+
+      while (index < chars.length) {
+        const char = chars[index];
+        const next = chars[index + 1];
+
+        if (canStartPronunciationWord(char)) {
+          index++;
+          continue;
+        }
+
+        if (
+          isInternalWordConnector(char.char) &&
+          next &&
+          !char.code &&
+          !char.link &&
+          canStartPronunciationWord(next)
+        ) {
+          index++;
+          continue;
+        }
+
+        break;
+      }
+
+      tokens.push({ type: 'word', start, end: index });
+      continue;
+    }
+
+    const start = index;
+    index++;
+    while (index < chars.length && !chars[index].linkHref && !canStartPronunciationWord(chars[index])) index++;
+    tokens.push({ type: 'separator', start, end: index });
   }
 
-  const segments: { start: number; end: number; highlighted: boolean }[] = [];
-  let i = 0;
-  while (i < length) {
-    const hl = i >= highlight.start && i < highlight.end;
-    let j = i + 1;
-    while (j < length && (j >= highlight.start && j < highlight.end) === hl) {
-      j++;
-    }
-    segments.push({ start: i, end: j, highlighted: hl });
-    i = j;
-  }
-  return segments;
+  return tokens;
+}
+
+function canStartPronunciationWord(char: RenderedChar): boolean {
+  return !char.code && !char.link && /[\p{L}\p{M}\p{N}]/u.test(char.char);
+}
+
+function isInternalWordConnector(char: string): boolean {
+  return char === "'" || char === '’' || char === '-';
 }
 
 function findWordBounds(text: string, index: number): { start: number; end: number } {
